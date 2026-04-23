@@ -9,6 +9,8 @@ import {
   BodyPart,
 } from '../data/cards';
 import { CircuitSkillTree } from '../components/CircuitSkillTree';
+import { LivePetCompanion } from '../components/LivePetCompanion';
+import { ActivePetGuide } from '../components/ActivePetGuide';
 
 const PANEL = '#182426';
 const PANEL_INNER = '#2e3a3d';
@@ -49,6 +51,14 @@ export function Battle() {
   const [sweepDrag, setSweepDrag] = useState<{ x:number; y:number; w:number; h:number } | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
 
+  // Pet companion triggers
+  const [lastAnnotationTime, setLastAnnotationTime] = useState<number>(0);
+  const [lastCardPlayTime, setLastCardPlayTime] = useState<number>(0);
+
+  // Active pet guide state
+  const [canvasRect, setCanvasRect] = useState<DOMRect | null>(null);
+  const [lastClickPos, setLastClickPos] = useState<{ x: number; y: number } | null>(null);
+
   const image = BATTLE_IMAGES[imageIdx % BATTLE_IMAGES.length];
 
   // init on mount
@@ -59,6 +69,18 @@ export function Battle() {
     return () => clearTimeout(t);
     // eslint-disable-next-line
   }, []);
+
+  // Track canvas rect
+  useEffect(() => {
+    const updateRect = () => {
+      if (canvasRef.current) {
+        setCanvasRect(canvasRef.current.getBoundingClientRect());
+      }
+    };
+    updateRect();
+    window.addEventListener('resize', updateRect);
+    return () => window.removeEventListener('resize', updateRect);
+  }, [phase]);
 
   // timer + focus drain + opponent progress
   useEffect(() => {
@@ -109,6 +131,8 @@ export function Battle() {
       setTimeout(() => setCrosshair(null), 500);
       addFocus(FOCUS_GAIN_ANNO);
       if (isHoneypot) registerHoneypot(correct);
+      setLastAnnotationTime(Date.now()); // Trigger pet reaction
+      setLastClickPos({ x, y }); // Guide pet to click location
     }
   };
 
@@ -131,6 +155,12 @@ export function Battle() {
     if (Math.abs(sweepDrag.w) > 2 && Math.abs(sweepDrag.h) > 2) {
       setAnnotations(prev => [...prev, { mode: 'sweep', ...sweepDrag, qIdx, correct: Math.random() > 0.3 }]);
       addFocus(FOCUS_GAIN_ANNO);
+      setLastAnnotationTime(Date.now()); // Trigger pet reaction
+      // Guide pet to center of sweep
+      setLastClickPos({
+        x: sweepDrag.x + sweepDrag.w / 2,
+        y: sweepDrag.y + sweepDrag.h / 2,
+      });
     }
     setSweepDrag(null);
   };
@@ -138,7 +168,10 @@ export function Battle() {
   // card play
   const tryPlayCard = useCallback((cardId: string, nodeId: string) => {
     const ok = playCard(cardId, nodeId);
-    if (ok) setSelectedCard(null);
+    if (ok) {
+      setSelectedCard(null);
+      setLastCardPlayTime(Date.now()); // Trigger pet reaction
+    }
     return ok;
   }, [playCard]);
 
@@ -153,14 +186,27 @@ export function Battle() {
 
   // ─── live "thinking" lines synthesized from current state
   const thinking = React.useMemo(() => {
-    const lines: { tone: 'obs' | 'hunch' | 'warn' | 'good'; text: string }[] = [];
+    const lines: { tone: 'obs' | 'hunch' | 'warn' | 'good'; text: string; timestamp?: number }[] = [];
     image.questions.forEach((qq, i) => {
       const n = annotations.filter(a => a.qIdx === i).length;
-      lines.push({ tone: 'obs', text: `Q${i+1} ${qq.short} · ${n ? n + ' marks' : 'scanning…'}` });
+      lines.push({ tone: 'obs', text: `Q${i+1} ${qq.short} · ${n ? n + ' marks' : 'scanning…'}`, timestamp: Date.now() });
     });
-    if (imageIdx === HONEYPOT_IDX) lines.push({ tone: 'warn', text: 'Honeypot suspected — audit each call.' });
-    if (cardCombat.honeypotStreak > 0) lines.push({ tone: 'good', text: `${cardCombat.honeypotStreak}× streak on decoys.` });
-    lines.push({ tone: 'hunch', text: cardCombat.trustScore > 65 ? 'Top-right edge looks staged.' : 'Pattern forming — cross-ref prior cases.' });
+    if (imageIdx === HONEYPOT_IDX) lines.push({ tone: 'warn', text: 'Honeypot suspected — audit each call.', timestamp: Date.now() });
+    if (cardCombat.honeypotStreak > 0) lines.push({ tone: 'good', text: `${cardCombat.honeypotStreak}× streak on decoys.`, timestamp: Date.now() });
+
+    // Add more dynamic thoughts based on recent activity
+    if (annotations.length > 0) {
+      const recentAnnotations = annotations.slice(-3);
+      const uniqueQs = new Set(recentAnnotations.map(a => a.qIdx)).size;
+      if (uniqueQs > 1) {
+        lines.push({ tone: 'hunch', text: 'Cross-referencing between regions...', timestamp: Date.now() });
+      }
+    }
+    if (annotations.length > 8) {
+      lines.push({ tone: 'good', text: 'Building comprehensive dataset!', timestamp: Date.now() });
+    }
+
+    lines.push({ tone: 'hunch', text: cardCombat.trustScore > 65 ? 'Top-right edge looks staged.' : 'Pattern forming — cross-ref prior cases.', timestamp: Date.now() });
     return lines;
   }, [image, annotations, cardCombat.honeypotStreak, cardCombat.trustScore, imageIdx]);
 
@@ -212,36 +258,36 @@ export function Battle() {
       <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr 280px', gap: 10, padding: 10, flex: 1, overflow: 'hidden' }}>
         {/* ── Left: companion dossier + live thinking + tiny ghost radar ── */}
         <div style={{ display: 'grid', gridTemplateRows: 'auto 1fr 120px', gap: 10, minHeight: 0 }}>
-          <div style={{
-            background: PANEL, border: `2px solid ${PANEL_INNER}`, borderRadius: 12, padding: 10,
-            display: 'flex', gap: 10, alignItems: 'center',
-          }}>
-            {activePokemon && (
-              <>
-                <div style={{
-                  width: 70, height: 70, borderRadius: 10,
-                  background: `radial-gradient(circle at 40% 30%, ${arch.color}55, #0a1a12)`,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  border: `2px solid ${arch.color}66`,
-                }}>
-                  <img src={getSpriteUrl(activePokemon.id)} style={{ width: 62, height: 62 }} />
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 9, color: arch.color, fontWeight: 800, letterSpacing: '0.18em' }}>{arch.label}</div>
-                  <div style={{ fontSize: 18, fontWeight: 900, color: '#fff', lineHeight: 1.05 }}>{activePokemon.name}</div>
-                  <div style={{ fontSize: 9, color: '#8ba5a0', letterSpacing: '0.15em', marginTop: 2 }}>
-                    FIELD AGENT · ON CASE
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
+          {activePokemon && (
+            <LivePetCompanion
+              pokemonId={activePokemon.id}
+              pokemonName={activePokemon.name}
+              architecture={activePokemon.architecture}
+              onAnnotation={lastAnnotationTime}
+              cardPlayed={lastCardPlayTime}
+              trustScore={cardCombat.trustScore}
+            />
+          )}
           <div style={{
             background: PANEL, border: `2px solid ${PANEL_INNER}`, borderRadius: 12,
             padding: 10, display: 'flex', flexDirection: 'column', gap: 6, overflow: 'hidden',
           }}>
-            <div style={{ fontSize: 10, fontWeight: 800, color: '#fff', letterSpacing: '0.2em' }}>
+            <div style={{ fontSize: 10, fontWeight: 800, color: '#fff', letterSpacing: '0.2em', display: 'flex', alignItems: 'center', gap: 6 }}>
               🧠 {activePokemon?.name?.toUpperCase() ?? 'AGENT'} IS THINKING
+              {/* Brain activity pulse */}
+              <motion.div
+                animate={{
+                  opacity: [0.4, 1, 0.4],
+                  scale: [1, 1.2, 1],
+                }}
+                transition={{ duration: 2, repeat: Infinity }}
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: '50%',
+                  background: arch.color,
+                  boxShadow: `0 0 8px ${arch.color}`,
+                }} />
             </div>
             <div style={{ fontSize: 9, color: '#8ba5a0', letterSpacing: '0.15em', fontWeight: 700 }}>
               SCENE · {image.label.toUpperCase()}
@@ -258,13 +304,35 @@ export function Battle() {
                   return (
                     <motion.div key={`${i}-${t.text}`}
                       initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: i * 0.05 }}
                       style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
                       <span style={{
                         fontSize: 8, fontWeight: 900, color: col, letterSpacing: '0.15em',
                         background: `${col}18`, border: `1px solid ${col}55`,
                         borderRadius: 4, padding: '1px 5px', marginTop: 2, flexShrink: 0,
                       }}>{label}</span>
-                      <span style={{ fontSize: 11, color: '#e9f2ea', lineHeight: 1.35 }}>{t.text}</span>
+                      <motion.span
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        transition={{ delay: i * 0.05 + 0.1, duration: 0.3 }}
+                        style={{ fontSize: 11, color: '#e9f2ea', lineHeight: 1.35 }}>
+                        {t.text}
+                      </motion.span>
+                      {/* Thinking pulse indicator for recent thoughts */}
+                      {t.timestamp && Date.now() - t.timestamp < 3000 && (
+                        <motion.div
+                          initial={{ opacity: 0, scale: 0 }}
+                          animate={{ opacity: [0, 0.8, 0], scale: [0.8, 1.2, 0.8] }}
+                          transition={{ duration: 1.5, repeat: Infinity }}
+                          style={{
+                            width: 4,
+                            height: 4,
+                            borderRadius: '50%',
+                            background: col,
+                            marginTop: 6,
+                            marginLeft: 'auto',
+                          }} />
+                      )}
                     </motion.div>
                   );
                 })}
@@ -365,6 +433,19 @@ export function Battle() {
                   }}/>
               )}
             </AnimatePresence>
+
+            {/* Active Pet Guide - circles around and responds to clicks */}
+            {activePokemon && phase === 'playing' && (
+              <ActivePetGuide
+                pokemonId={activePokemon.id}
+                pokemonName={activePokemon.name}
+                architecture={activePokemon.architecture}
+                canvasRect={canvasRect}
+                lastClickPos={lastClickPos}
+                onAnnotation={lastAnnotationTime}
+                trustScore={cardCombat.trustScore}
+              />
+            )}
           </div>
 
           {/* progress + next */}
